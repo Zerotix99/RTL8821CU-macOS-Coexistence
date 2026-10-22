@@ -4,7 +4,7 @@
  * Intelligently and automatically adapts antenna allocation based on real-time
  * radio state:
  *   - Wi-Fi Only: 100% antenna to Wi-Fi when Bluetooth is powered off.
- *   - Standby Low-Overhead: 87% Wi-Fi (100ms WL / 15ms BT) when Bluetooth is idle.
+ *   - Standby Low-Overhead: 94% Wi-Fi (470ms WL / 30ms BT) when Bluetooth is idle.
  *   - Active TDMA: 35ms WL / 30ms BT when Bluetooth audio/device is connected.
  *   - BT Only: 100% antenna to Bluetooth when Wi-Fi is disconnected/down.
  *
@@ -45,25 +45,22 @@ typedef enum {
     MODE_UNINITIALIZED = 0,
     MODE_WIFI_ONLY,            // Bluetooth is OFF -> 100% antenna to Wi-Fi
     MODE_BT_ONLY,              // Wi-Fi is OFF/Down -> 100% antenna to Bluetooth
-    MODE_CONCURRENT_5G,        // Wi-Fi on 5 GHz + BT 2.4 GHz -> 100% Simultaneous! No TDMA!
-    MODE_STANDBY_LOW_OVERHEAD, // BT ON, 0 dev connected (2.4 GHz) -> 470ms WL / 30ms BT
-    MODE_ACTIVE_TDMA           // BT device connected (2.4 GHz) -> 35ms WL / 30ms BT
+    MODE_STANDBY_LOW_OVERHEAD, // BT ON, but no devices connected -> 470ms WL / 30ms BT
+    MODE_ACTIVE_TDMA           // BT device connected -> 35ms WL / 30ms BT
 } CoexMode;
 
 static volatile sig_atomic_t g_running = 1;
 static io_connect_t g_connect = 0;
 static bool g_verbose = false;
-static bool g_force_5g = false;
-static bool g_force_2g = false;
 static char g_wifi_ifname[32] = "en2";
 
 // Active TDMA Slot Durations
 static int g_active_bt_ms = 30;
 static int g_active_wl_ms = 35;
 
-// Standby TDMA Slot Durations (Low Overhead)
-#define STANDBY_BT_MS 15
-#define STANDBY_WL_MS 100
+// Standby TDMA Slot Durations (Low Overhead: 94% Wi-Fi duty cycle)
+#define STANDBY_BT_MS 30
+#define STANDBY_WL_MS 470
 
 static void handle_signal(int sig) {
     g_running = 0;
@@ -124,35 +121,6 @@ static int is_wifi_enabled(const char *ifname) {
     return enabled;
 }
 
-static int is_wifi_5g(void) {
-    if (g_force_5g) return 1;
-    if (g_force_2g) return 0;
-
-    NSString *plistPath = @"/Library/Application Support/WLAN/com.realtek.utility.wifi/ProfilesList.plist";
-    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:plistPath];
-    if (!dict) return 0;
-
-    NSArray *objects = dict[@"$objects"];
-    if (!objects || ![objects isKindOfClass:[NSArray class]]) return 0;
-
-    // Search for Channel value in NSKeyedArchiver objects
-    for (NSUInteger i = 0; i < [objects count]; i++) {
-        id obj = objects[i];
-        if ([obj isKindOfClass:[NSString class]] && [obj isEqualToString:@"Channel"]) {
-            for (NSUInteger j = 0; j < [objects count]; j++) {
-                id val = objects[j];
-                if ([val isKindOfClass:[NSNumber class]]) {
-                    int ch = [val intValue];
-                    if (ch > 14) {
-                        return 1; // 5 GHz channel detected (e.g. 36, 40, 44, 48, etc.)
-                    }
-                }
-            }
-        }
-    }
-    return 0;
-}
-
 static CoexMode evaluate_system_state(void) {
     @autoreleasepool {
         IOBluetoothHostController *ctl = [IOBluetoothHostController defaultController];
@@ -171,12 +139,7 @@ static CoexMode evaluate_system_state(void) {
             return MODE_WIFI_ONLY; // Default idle
         }
 
-        // Both radios are enabled: Check if Wi-Fi is on 5 GHz
-        if (is_wifi_5g()) {
-            return MODE_CONCURRENT_5G;
-        }
-
-        // Wi-Fi is on 2.4 GHz: must time-share the 2.4 GHz spectrum with Bluetooth
+        // Both are enabled: check if any Bluetooth audio devices are connected
         NSArray *paired = [IOBluetoothDevice pairedDevices];
         int connectedCount = 0;
         for (IOBluetoothDevice *d in paired) {
@@ -197,7 +160,6 @@ static const char* mode_name(CoexMode m) {
     switch (m) {
         case MODE_WIFI_ONLY:            return "WIFI_ONLY (100% Wi-Fi)";
         case MODE_BT_ONLY:              return "BT_ONLY (100% Bluetooth)";
-        case MODE_CONCURRENT_5G:        return "CONCURRENT_5G (100% 5GHz WL + 100% BT Simultaneous)";
         case MODE_STANDBY_LOW_OVERHEAD: return "STANDBY_LOW_OVERHEAD (470ms WL / 30ms BT)";
         case MODE_ACTIVE_TDMA:          return "ACTIVE_TDMA (35ms WL / 30ms BT)";
         default:                        return "UNKNOWN";
@@ -207,8 +169,6 @@ static const char* mode_name(CoexMode m) {
 static void print_usage(const char *prog) {
     printf("Usage: %s [options]\n", prog);
     printf("Options:\n");
-    printf("  -5, --force-5g        Force 5 GHz concurrent mode (no TDMA, 100%% WL + 100%% BT)\n");
-    printf("  -2, --force-2g        Force 2.4 GHz TDMA mode\n");
     printf("  -b, --bt-slot <ms>    Active Bluetooth slot duration in ms (default: %d)\n", g_active_bt_ms);
     printf("  -w, --wl-slot <ms>    Active Wi-Fi slot duration in ms (default: %d)\n", g_active_wl_ms);
     printf("  -i, --interface <if>  Wi-Fi interface name to monitor (default: %s)\n", g_wifi_ifname);
@@ -218,8 +178,6 @@ static void print_usage(const char *prog) {
 
 int main(int argc, char **argv) {
     static struct option long_options[] = {
-        {"force-5g",  no_argument,       0, '5'},
-        {"force-2g",  no_argument,       0, '2'},
         {"bt-slot",   required_argument, 0, 'b'},
         {"wl-slot",   required_argument, 0, 'w'},
         {"interface", required_argument, 0, 'i'},
@@ -229,16 +187,8 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "52b:w:i:vh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "b:w:i:vh", long_options, NULL)) != -1) {
         switch (opt) {
-            case '5':
-                g_force_5g = true;
-                g_force_2g = false;
-                break;
-            case '2':
-                g_force_2g = true;
-                g_force_5g = false;
-                break;
             case 'b':
                 g_active_bt_ms = atoi(optarg);
                 break;
@@ -265,7 +215,7 @@ int main(int argc, char **argv) {
 
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     openlog("rtwcoexd", LOG_PID | LOG_CONS, LOG_DAEMON);
-    syslog(LOG_INFO, "rtwcoexd v3.1 (Dynamic Dual-Band 5G/2.4G Coexistence) starting...");
+    syslog(LOG_INFO, "rtwcoexd v3.0 (Dynamic Adaptive Coexistence) starting...");
 
     CoexMode current_mode = MODE_UNINITIALIZED;
 
@@ -296,13 +246,6 @@ int main(int argc, char **argv) {
                     write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_BT_MANUAL, 4);
                     write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
                     break;
-                case MODE_CONCURRENT_5G:
-                    // 5 GHz Wi-Fi + 2.4 GHz Bluetooth: Hardware PTA mode
-                    // Wi-Fi passes through 5 GHz diplexer filter, BT passes through 2.4 GHz filter.
-                    // Both are granted simultaneous full access! No TDMA loop required.
-                    write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
-                    write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_WL_PRIORITY);
-                    break;
                 case MODE_STANDBY_LOW_OVERHEAD:
                 case MODE_ACTIVE_TDMA:
                     write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
@@ -313,8 +256,8 @@ int main(int argc, char **argv) {
         }
 
         // Execute behavior based on current mode
-        if (current_mode == MODE_WIFI_ONLY || current_mode == MODE_BT_ONLY || current_mode == MODE_CONCURRENT_5G) {
-            // Static / Concurrent mode: 100% antenna access. No TDMA switching overhead.
+        if (current_mode == MODE_WIFI_ONLY || current_mode == MODE_BT_ONLY) {
+            // Static mode: 100% exclusive antenna time. No switching overhead.
             for (int i = 0; i < 10 && g_running; i++) {
                 usleep(100000); // 100ms * 10 = 1s
             }

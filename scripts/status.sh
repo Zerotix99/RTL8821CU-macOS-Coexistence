@@ -43,7 +43,7 @@ except:
     pass
 ' 2>/dev/null)
         if [ -n "$CH" ] && [ "$CH" -gt 14 ] 2>/dev/null; then
-            echo "   Band: 5 GHz (Channel $CH) -> MODE_CONCURRENT_5G (100% Simultaneous, Zero TDMA)"
+            echo "   Band: 5 GHz (Channel $CH) -> Dynamic Adaptive TDMA (High-Throughput 802.11ac)"
         elif [ -n "$CH" ]; then
             echo "   Band: 2.4 GHz (Channel $CH) -> Dynamic Adaptive TDMA Mode"
         fi
