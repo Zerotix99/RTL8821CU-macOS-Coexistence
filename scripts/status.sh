@@ -30,7 +30,18 @@ if [ -n "$IP" ]; then
     # Detect operating frequency band
     PROF_PLIST="/Library/Application Support/WLAN/com.realtek.utility.wifi/ProfilesList.plist"
     if [ -f "$PROF_PLIST" ]; then
-        CH=$(plutil -p "$PROF_PLIST" 2>/dev/null | grep -A 1 '"Channel"' | tail -n 1 | awk '{print $NF}')
+        CH=$(python3 -c '
+import plistlib
+try:
+    with open("'"$PROF_PLIST"'", "rb") as f:
+        pl = plistlib.load(f)
+    for obj in pl.get("$objects", []):
+        if isinstance(obj, int) and 1 <= obj <= 196 and obj not in (1, 6):
+            print(obj)
+            break
+except:
+    pass
+' 2>/dev/null)
         if [ -n "$CH" ] && [ "$CH" -gt 14 ] 2>/dev/null; then
             echo "   Band: 5 GHz (Channel $CH) -> MODE_CONCURRENT_5G (100% Simultaneous, Zero TDMA)"
         elif [ -n "$CH" ]; then
