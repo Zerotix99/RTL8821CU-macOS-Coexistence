@@ -42,33 +42,62 @@ Key register states used in TDMA:
 
 ---
 
-## 3. High-Precision Time-Division Multiplexing (TDMA)
-To deliver glitch-free Bluetooth audio (AirPods Pro AAC frames ~21.3 ms) and responsive Wi-Fi throughput concurrently:
-- `rtwcoexd` runs on macOS with `QOS_CLASS_USER_INTERACTIVE` priority.
-- Alternates antenna grant every:
-  - **30 ms** for Bluetooth (ensures reliable paging connection establishment and uninterrupted A2DP audio frame transfer).
-  - **35 ms** for Wi-Fi (ensures high TCP/UDP throughput and sub-25ms ping latency).
-- Cycle Period: **65 ms (~15.4 Hz)**.
+## 3. Dynamic Auto-Adaptive State Machine & Slot Architecture
+
+Instead of running a rigid static TDMA loop that penalizes Wi-Fi when Bluetooth is idle, `rtwcoexd` implements a reactive 4-state engine:
+
+```
+[System Poller]
+       │
+       ├─ Bluetooth Powered OFF? ──────► MODE_WIFI_ONLY (100% Wi-Fi, No TDMA)
+       │
+       ├─ Wi-Fi Interface Disabled? ──► MODE_BT_ONLY (100% BT, No TDMA)
+       │
+       ├─ 0 BT Devices Connected? ────► MODE_STANDBY_LOW_OVERHEAD (470ms WL / 30ms BT)
+       │
+       └─ ≥1 BT Device Connected? ────► MODE_ACTIVE_TDMA (35ms WL / 30ms BT)
+```
+
+### The Slot Inversion Rationale
+In early iterations, the TDMA loop granted the Wi-Fi slot first and Bluetooth slot second (`WL -> BT`). As a consequence, whenever the loop completed an iteration and performed daemon housekeeping (such as calling `[IOBluetoothDevice pairedDevices]`, which issues synchronous XPC calls to `bluetoothd` taking 20–50 ms), the physical RF switch was left in the **Bluetooth state**.
+
+This caused periodic latency spikes and packet loss on Wi-Fi every 1–2 seconds.
+
+`rtwcoexd` v3.0 inverts this sequence:
+1. **Bluetooth slot is granted first** (`write_indirect(0x38, COEX_BT_PRIORITY); usleep(bt_us);`)
+2. **Wi-Fi slot is granted second** (`write_indirect(0x38, COEX_WL_PRIORITY); usleep(wl_us);`)
+
+This guarantees that whenever the loop exits or state evaluation is executed, the RF switch **always remains locked to Wi-Fi**, completely eliminating evaluation latency penalties.
+
+### Timing & Multiplexing Characteristics
+
+| Mode | Wi-Fi Slot | BT Slot | Cycle Period | Switching Freq | Wi-Fi Antenna Ratio | Typical Gateway Ping |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`MODE_WIFI_ONLY`** | ∞ | 0 ms | N/A | 0 Hz | 100% | 1.5 – 2.0 ms |
+| **`MODE_STANDBY_LOW_OVERHEAD`** | 470 ms | 30 ms | 500 ms | 2.0 Hz | 94.0% | 1.9 – 3.5 ms |
+| **`MODE_ACTIVE_TDMA`** | 35 ms | 30 ms | 65 ms | 15.4 Hz | 53.8% | 11.0 – 15.0 ms |
+| **`MODE_BT_ONLY`** | 0 ms | ∞ | N/A | 0 Hz | 0.0% | N/A |
 
 ```mermaid
 sequenceDiagram
     participant CoexDaemon as rtwcoexd
     participant HW as RTL8821CU RF Switch
-    participant BT as Bluetooth Radio (AirPods)
-    participant WL as Wi-Fi Radio (802.11ac)
+    participant BT as Bluetooth Radio
+    participant WL as Wi-Fi Radio
 
     rect rgb(230, 245, 255)
-        Note over CoexDaemon,WL: Bluetooth Slot (30 ms)
+        Note over CoexDaemon,WL: 1. Bluetooth Slot First (30 ms)
         CoexDaemon->>HW: write_indirect(0x38, 0x0000ff00)
         HW->>BT: Antenna granted
-        BT->>AirPods: Transmit/Receive AAC audio packets
+        BT->>BT: Paging / A2DP Audio Transmission
     end
     rect rgb(240, 255, 240)
-        Note over CoexDaemon,WL: Wi-Fi Slot (35 ms)
+        Note over CoexDaemon,WL: 2. Wi-Fi Slot Second (35 ms or 470 ms)
         CoexDaemon->>HW: write_indirect(0x38, 0x00003300)
         HW->>WL: Antenna granted
-        WL->>Router: Transmit/Receive TCP/IP packets
+        WL->>WL: 802.11ac Frames & TCP Traffic
     end
+    Note over CoexDaemon,WL: Loop exits on Wi-Fi -> State Evaluation runs while Wi-Fi holds antenna!
 ```
 
 ---

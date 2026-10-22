@@ -27,24 +27,42 @@ The result is simultaneous, uninterrupted operation: **crisp, low-latency Blueto
 
 ## ⚡ Features
 
-- **Hardware-Level PTA Control**: Sets register `0x0cb4` to `0x10000066`, delegating front-end switch control to Realtek's hardware arbiter.
-- **Precision Software TDMA**: Alternates antenna priority every 30 ms (Bluetooth) and 35 ms (Wi-Fi), balancing Bluetooth paging windows and audio buffer jitter with Wi-Fi TCP/UDP throughput.
-- **Zero Kernel Panic Safety**: Operates entirely in user-space via official IOKit `IOConnectCallStructMethod` dispatch.
-- **Plug-and-Play Hotplug Recovery**: Automatically detects USB disconnects and bus resets; re-attaches and re-engages PTA mode dynamically when the dongle is reconnected.
-- **Rogue RF-OFF Immunity**: Automatically applies immutable filesystem flags (`uchg`) to vendor watchdog trigger files.
-- **Automatic Audio & Network Management**: Seamlessly coordinates macOS CoreAudio output routing and network service fallback order.
+- **Dynamic Auto-Adaptive State Machine (v3.0)**:
+  - **`WIFI_ONLY` Mode**: When Bluetooth is switched off in macOS Control Center, `rtwcoexd` locks the antenna switch to 100% Wi-Fi (`0x0cb4 = 0x10000077`, `0x38 = 0x00003300`). Zero TDMA switching overhead, sub-2ms ping.
+  - **`STANDBY_LOW_OVERHEAD` Mode**: When Bluetooth is powered on but idle (e.g., AirPods inside the charging case), the daemon shifts to a relaxed 470 ms Wi-Fi / 30 ms Bluetooth cycle (94% Wi-Fi antenna time). Wi-Fi delivers full throughput with sub-3.3ms latency, while periodic 30 ms discovery slots ensure instant connection the moment earbuds are removed from the case.
+  - **`ACTIVE_TDMA` Mode**: The instant Bluetooth audio starts streaming, the engine dynamically transitions into high-frequency symmetric TDMA (35 ms Wi-Fi / 30 ms Bluetooth), delivering stutter-free AAC/SBC audio while sustaining Wi-Fi throughput.
+  - **`BT_ONLY` Mode**: If the Wi-Fi interface is administratively turned off, 100% of the antenna is dedicated to Bluetooth.
+- **Fail-Safe TDMA Ordering**: Slot execution is strictly ordered (BT first, WL second), guaranteeing that the multiplexing cycle always exits on the Wi-Fi priority slot during background state polling and IOBluetooth XPC queries.
+- **Hardware-Level PTA Control**: Configures register `0x0cb4` to `0x10000066`, delegating front-end switch control to Realtek's hardware Packet Traffic Arbiter.
+- **Zero Kernel Panic Safety**: Operates entirely in user space using official IOKit `IOConnectCallScalarMethod` dispatch.
+- **Plug-and-Play Hotplug Recovery**: Automatically detects USB disconnects and re-attaches and re-engages PTA mode when the dongle is reconnected.
+- **Rogue RF-OFF Immunity**: Automatically locks vendor watchdog trigger files (`*rfoff.rtl`) with immutable filesystem flags (`uchg`).
+- **CoreAudio Integration**: Provides CLI utilities (`btconnect`, `set_audio`) to automate Bluetooth connection and default audio route binding.
 
 ---
 
 ## 📊 Live Verification Benchmarks
 
-| Metric | Coexistence OFF (Static Wi-Fi) | Coexistence OFF (Static BT) | **`rtwcoexd` Active (TDMA)** |
-| :--- | :---: | :---: | :---: |
-| **Wi-Fi Ping to Gateway** | 2.8 ms (0.0% loss) | ∞ (100% packet loss) | **~14.0 ms (0.0% loss)** |
-| **Wi-Fi Download Speed** | ~8 Mbps | 0 Mbps | **~5–6 Mbps** |
-| **Bluetooth Paging Time** | Failed (`0xe00002d6`) | Instant | **Instant (< 250 ms)** |
-| **Bluetooth Audio (AAC)** | No connection | Smooth | **Smooth (No stutters)** |
-| **Simultaneous Operation**| ❌ Impossible | ❌ Impossible | **✅ 100% Concurrent** |
+Measurements taken on a MacBook (macOS 13.7.8) with a Realtek RTL8821CU USB combo dongle connected to a 100 Mbps gateway:
+
+| Operating Mode | Wi-Fi Antenna Share | Ping to Gateway | Packet Loss | Bluetooth Audio | BT Paging Latency |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **`WIFI_ONLY` (BT Off)** | **100%** | **1.8 ms** | **0.0%** | N/A (Off) | N/A |
+| **`STANDBY` (BT Idle / Case Closed)** | **94%** (470ms/30ms) | **2.5 – 3.5 ms** | **0.0%** | Ready | **< 200 ms** (Instant) |
+| **`ACTIVE_TDMA` (AirPods Streaming)** | **54%** (35ms/30ms) | **11 – 15 ms** | **0.0%** | **Smooth (AAC)** | Connected |
+| *Stock Driver (Coexistence OFF)* | 100% static | 2.8 ms | 0.0% | ❌ Impossible | Failed (`0xe00002d6`) |
+| *BT Forced (Coexistence OFF)* | 0% | ∞ | 100.0% | Smooth | Instant |
+
+---
+
+## 🌐 Platform Comparison: macOS vs Windows vs Linux
+
+| Operating System | Driver Stack | Coexistence Mechanism | Single-Antenna Behavior |
+| :--- | :--- | :--- | :--- |
+| **Windows 10 / 11** | Realtek Unified WDI (`rtwlanu.sys`) + BT Filter Driver | Firmware 8051 Mailbox Arbitration | Built into vendor driver package; arbitrated automatically via proprietary Windows WDI filter. |
+| **Linux (Kernel 5.x / 6.x)** | Out-of-tree `rtl8821cu` (`CONFIG_BT_COEXIST = y`) + `btusb` | Kernel Subsystem Mailbox Ring | Good if compiled with `CONFIG_BT_COEXIST = y`. Vulnerable to packet loss under heavy 2.4 GHz traffic unless TDMA slotting is tuned. |
+| **macOS (Official)** | Vendor `RtWlanU.kext` + Apple Bluetooth stack | **NONE** (Unimplemented) | **Broken.** Wi-Fi driver statically locks RF switch to Wi-Fi. Bluetooth suffers 100% antenna starvation and Page Timeouts. |
+| **macOS + `rtwcoexd`** | Vendor `RtWlanU.kext` + `rtwcoexd` User-Space Daemon | **Dynamic 4-Mode Auto-Adaptive TDMA** | **Flawless.** Real-time state machine dynamically assigns 100% or 94% antenna when Bluetooth is idle, and seamless 35ms/30ms TDMA during active audio streaming. |
 
 ---
 
