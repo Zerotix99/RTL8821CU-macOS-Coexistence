@@ -24,7 +24,7 @@ if [ -n "$IP" ]; then
     GATEWAY=$(netstat -rn | grep default | awk '{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
     GATEWAY=${GATEWAY:-1.1.1.1}
     echo -n "   Ping to Gateway ($GATEWAY via $RT_IF): "
-    PING_RES=$(ping -c 3 -t 2 -S "$IP" "$GATEWAY" 2>/dev/null | grep "packet loss" | awk -F', ' '{print $3}')
+    PING_RES=$(ping -c 3 -W 1000 -S "$IP" "$GATEWAY" 2>/dev/null | grep "packet loss" | awk -F', ' '{print $3}')
     echo "${PING_RES:-Available}"
 
     # Detect operating frequency band
