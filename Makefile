@@ -11,9 +11,9 @@ TARGETS = $(BUILD_DIR)/rtwcoexd $(BUILD_DIR)/btconnect $(BUILD_DIR)/set_audio
 
 all: $(TARGETS)
 
-$(BUILD_DIR)/rtwcoexd: $(SRC_DIR)/rtwcoexd.c
+$(BUILD_DIR)/rtwcoexd: $(SRC_DIR)/rtwcoexd.m
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(IOKIT_FLAGS) $< -o $@
+	$(CC) $(CFLAGS) $(IOKIT_FLAGS) $(BT_FLAGS) $< -o $@
 
 $(BUILD_DIR)/btconnect: $(SRC_DIR)/btconnect.m
 	@mkdir -p $(BUILD_DIR)

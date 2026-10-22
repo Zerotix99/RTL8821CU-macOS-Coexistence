@@ -15,7 +15,7 @@ echo "=== RTL8821CU macOS Coexistence Installer ==="
 # 1. Compile binaries
 echo "[1/6] Compiling rtwcoexd, btconnect, set_audio..."
 mkdir -p "$REPO_DIR/build"
-clang -O2 -Wall -framework IOKit "$REPO_DIR/src/rtwcoexd.c" -o "$REPO_DIR/build/rtwcoexd"
+clang -O2 -Wall -framework IOKit -framework Foundation -framework IOBluetooth "$REPO_DIR/src/rtwcoexd.m" -o "$REPO_DIR/build/rtwcoexd"
 clang -O2 -Wall -framework Foundation -framework IOBluetooth "$REPO_DIR/src/btconnect.m" -o "$REPO_DIR/build/btconnect"
 clang -O2 -Wall -framework Foundation -framework CoreAudio "$REPO_DIR/src/set_audio.m" -o "$REPO_DIR/build/set_audio"
 
