@@ -26,6 +26,17 @@ if [ -n "$IP" ]; then
     echo -n "   Ping to Gateway ($GATEWAY via $RT_IF): "
     PING_RES=$(ping -c 3 -t 2 -S "$IP" "$GATEWAY" 2>/dev/null | grep "packet loss" | awk -F', ' '{print $3}')
     echo "${PING_RES:-Available}"
+
+    # Detect operating frequency band
+    PROF_PLIST="/Library/Application Support/WLAN/com.realtek.utility.wifi/ProfilesList.plist"
+    if [ -f "$PROF_PLIST" ]; then
+        CH=$(plutil -p "$PROF_PLIST" 2>/dev/null | grep -A 1 '"Channel"' | tail -n 1 | awk '{print $NF}')
+        if [ -n "$CH" ] && [ "$CH" -gt 14 ] 2>/dev/null; then
+            echo "   Band: 5 GHz (Channel $CH) -> MODE_CONCURRENT_5G (100% Simultaneous, Zero TDMA)"
+        elif [ -n "$CH" ]; then
+            echo "   Band: 2.4 GHz (Channel $CH) -> Dynamic Adaptive TDMA Mode"
+        fi
+    fi
 else
     echo "OFFLINE"
 fi
