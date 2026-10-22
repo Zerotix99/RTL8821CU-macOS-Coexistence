@@ -96,8 +96,8 @@ int main(int argc, const char * argv[]) {
             return 0;
         }
 
-        printf("Opening connection (page timeout: 3000ms)...\n");
-        IOReturn kr = [targetDevice openConnection:nil withPageTimeout:3000 authenticationRequired:NO];
+        printf("Opening connection (page timeout: 5000ms)...\n");
+        IOReturn kr = [targetDevice openConnection:nil withPageTimeout:5000 authenticationRequired:NO];
         if (kr == kIOReturnSuccess) {
             usleep(250000); // 250ms for services to settle
             printf("Success: Connected to %s (status: %s)\n",

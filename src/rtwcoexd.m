@@ -3,10 +3,10 @@
  * 
  * Intelligently and automatically adapts antenna allocation based on real-time
  * radio state:
- *   - Wi-Fi Only: 100% antenna to Wi-Fi when Bluetooth is powered off.
- *   - Standby Low-Overhead: 94% Wi-Fi (470ms WL / 30ms BT) when Bluetooth is idle.
- *   - Active TDMA: 35ms WL / 30ms BT when Bluetooth audio/device is connected.
- *   - BT Only: 100% antenna to Bluetooth when Wi-Fi is disconnected/down.
+ *   - Wi-Fi Only: 100% exclusive antenna to Wi-Fi when Bluetooth is powered off.
+ *   - BT Only: 100% exclusive antenna to Bluetooth when Wi-Fi is disconnected/down.
+ *   - Coexistence TDMA: Continuous 35ms WL / 30ms BT when both radios are enabled,
+ *     guaranteeing immediate Bluetooth connection, glitch-free audio, and concurrent Wi-Fi.
  *
  * Copyright (c) 2026 Magnus Krüger. Released under the MIT License.
  */
@@ -45,8 +45,7 @@ typedef enum {
     MODE_UNINITIALIZED = 0,
     MODE_WIFI_ONLY,            // Bluetooth is OFF -> 100% antenna to Wi-Fi
     MODE_BT_ONLY,              // Wi-Fi is OFF/Down -> 100% antenna to Bluetooth
-    MODE_STANDBY_LOW_OVERHEAD, // BT ON, but no devices connected -> 470ms WL / 30ms BT
-    MODE_ACTIVE_TDMA           // BT device connected -> 35ms WL / 30ms BT
+    MODE_COEXISTENCE_TDMA      // Both ON -> 35ms WL / 30ms BT TDMA (Full Coexistence)
 } CoexMode;
 
 static volatile sig_atomic_t g_running = 1;
@@ -57,10 +56,6 @@ static char g_wifi_ifname[32] = "en2";
 // Active TDMA Slot Durations
 static int g_active_bt_ms = 30;
 static int g_active_wl_ms = 35;
-
-// Standby TDMA Slot Durations (Low Overhead: 94% Wi-Fi duty cycle)
-#define STANDBY_BT_MS 30
-#define STANDBY_WL_MS 470
 
 static void handle_signal(int sig) {
     g_running = 0;
@@ -139,30 +134,18 @@ static CoexMode evaluate_system_state(void) {
             return MODE_WIFI_ONLY; // Default idle
         }
 
-        // Both are enabled: check if any Bluetooth audio devices are connected
-        NSArray *paired = [IOBluetoothDevice pairedDevices];
-        int connectedCount = 0;
-        for (IOBluetoothDevice *d in paired) {
-            if ([d isConnected]) {
-                connectedCount++;
-            }
-        }
-
-        if (connectedCount > 0) {
-            return MODE_ACTIVE_TDMA;
-        } else {
-            return MODE_STANDBY_LOW_OVERHEAD;
-        }
+        // Both are enabled: Run full coexistence TDMA
+        // Guarantees reliable pairing, instant reconnection, and smooth audio streaming.
+        return MODE_COEXISTENCE_TDMA;
     }
 }
 
 static const char* mode_name(CoexMode m) {
     switch (m) {
-        case MODE_WIFI_ONLY:            return "WIFI_ONLY (100% Wi-Fi)";
-        case MODE_BT_ONLY:              return "BT_ONLY (100% Bluetooth)";
-        case MODE_STANDBY_LOW_OVERHEAD: return "STANDBY_LOW_OVERHEAD (470ms WL / 30ms BT)";
-        case MODE_ACTIVE_TDMA:          return "ACTIVE_TDMA (35ms WL / 30ms BT)";
-        default:                        return "UNKNOWN";
+        case MODE_WIFI_ONLY:         return "WIFI_ONLY (100% Wi-Fi)";
+        case MODE_BT_ONLY:           return "BT_ONLY (100% Bluetooth)";
+        case MODE_COEXISTENCE_TDMA:  return "COEXISTENCE_TDMA (35ms WL / 30ms BT)";
+        default:                     return "UNKNOWN";
     }
 }
 
@@ -246,8 +229,7 @@ int main(int argc, char **argv) {
                     write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_BT_MANUAL, 4);
                     write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
                     break;
-                case MODE_STANDBY_LOW_OVERHEAD:
-                case MODE_ACTIVE_TDMA:
+                case MODE_COEXISTENCE_TDMA:
                     write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
                     break;
                 default:
@@ -261,23 +243,10 @@ int main(int argc, char **argv) {
             for (int i = 0; i < 10 && g_running; i++) {
                 usleep(100000); // 100ms * 10 = 1s
             }
-        } else if (current_mode == MODE_STANDBY_LOW_OVERHEAD) {
-            // Standby TDMA: 470ms WL / 30ms BT (94% Wi-Fi antenna time)
-            // 2 cycles = ~1 second. Wi-Fi has sub-3ms latency, zero packet loss,
-            // while BT retains periodic discovery windows for instant pairing.
-            for (int i = 0; i < 2 && g_running; i++) {
-                // Bluetooth slot first
-                write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
-                usleep(30000); // 30ms
-
-                // Wi-Fi slot second (ensures antenna stays on Wi-Fi during evaluation)
-                write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_WL_PRIORITY);
-                usleep(470000); // 470ms
-            }
-            write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
-        } else if (current_mode == MODE_ACTIVE_TDMA) {
-            // Active Audio TDMA: 30ms BT / 35ms WL (tuned for glitch-free AAC streaming)
-            // 15 cycles = ~975ms. Always end iteration on Wi-Fi slot.
+        } else if (current_mode == MODE_COEXISTENCE_TDMA) {
+            // Full Coexistence TDMA: 30ms BT / 35ms WL (~15.4 Hz)
+            // 15 cycles = ~975ms per state evaluation.
+            // Guarantees immediate Bluetooth pairing & crystal-clear audio while sustaining Wi-Fi.
             for (int i = 0; i < 15 && g_running; i++) {
                 // Bluetooth slot first
                 write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);

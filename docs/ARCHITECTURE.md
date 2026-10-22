@@ -44,7 +44,7 @@ Key register states used in TDMA:
 
 ## 3. Dynamic Auto-Adaptive State Machine & Slot Architecture
 
-Instead of running a rigid static TDMA loop that penalizes Wi-Fi when Bluetooth is idle, `rtwcoexd` implements a reactive 4-state engine:
+`rtwcoexd` implements a lean, zero-overhead 3-state engine designed to eliminate Bluetooth starvation while maintaining maximum Wi-Fi throughput:
 
 ```
 [System Poller]
@@ -53,9 +53,7 @@ Instead of running a rigid static TDMA loop that penalizes Wi-Fi when Bluetooth 
        │
        ├─ Wi-Fi Interface Disabled? ──► MODE_BT_ONLY (100% BT, No TDMA)
        │
-       ├─ 0 BT Devices Connected? ────► MODE_STANDBY_LOW_OVERHEAD (470ms WL / 30ms BT)
-       │
-       └─ ≥1 BT Device Connected? ────► MODE_ACTIVE_TDMA (35ms WL / 30ms BT)
+       └─ Both Radios Powered ON? ─────► MODE_COEXISTENCE_TDMA (35ms WL / 30ms BT)
 ```
 
 ### RF Front-End Architecture: SP3T Switch vs. Diplexing
@@ -66,7 +64,7 @@ Realtek RTL8821CU USB combo dongles use a single shared RF port routed through a
 
 Because the single external antenna is connected via this RF switch rather than an RF diplexer filter array, **only one RF chain can physically contact the antenna at any given instant**. When the RF switch routes the antenna to Wi-Fi (even on 5 GHz), the Bluetooth transceiver is completely disconnected, resulting in immediate Page Timeout (`0xe00002d6`) and loss of audio.
 
-Consequently, **TDMA time-division multiplexing is essential across both 2.4 GHz and 5 GHz bands**.
+Consequently, **continuous TDMA time-division multiplexing is essential whenever Bluetooth is enabled**, guaranteeing that Bluetooth discovery, paging, and audio frames are never starved.
 
 ### 5 GHz Throughput Advantage under TDMA
 Even with TDMA time-slicing (35 ms Wi-Fi / 30 ms Bluetooth), operating on 5 GHz yields massive performance improvements over 2.4 GHz:
@@ -74,7 +72,7 @@ Even with TDMA time-slicing (35 ms Wi-Fi / 30 ms Bluetooth), operating on 5 GHz 
 - **5 GHz (802.11ac, 80 MHz)**: Achieves **~74 Mbps real download throughput** (measured: 10 MB in 1.14s) under the same 35ms/30ms TDMA slotting, thanks to 256-QAM high-speed burst transmission during the Wi-Fi slot.
 
 ### The Slot Inversion Rationale
-In early iterations, the TDMA loop granted the Wi-Fi slot first and Bluetooth slot second (`WL -> BT`). As a consequence, whenever the loop completed an iteration and performed daemon housekeeping (such as calling `[IOBluetoothDevice pairedDevices]`, which issues synchronous XPC calls to `bluetoothd` taking 20–50 ms), the physical RF switch was left in the **Bluetooth state**.
+In early iterations, the TDMA loop granted the Wi-Fi slot first and Bluetooth slot second (`WL -> BT`). As a consequence, whenever the loop completed an iteration and performed daemon housekeeping, the physical RF switch was left in the **Bluetooth state**.
 
 This caused periodic latency spikes and packet loss on Wi-Fi every 1–2 seconds.
 
@@ -88,11 +86,10 @@ This guarantees that whenever the loop exits or state evaluation is executed, th
 
 | Mode | Wi-Fi Slot | BT Slot | Cycle Period | Switching Freq | Wi-Fi Antenna Ratio | Typical Gateway Ping |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`MODE_WIFI_ONLY`** | ∞ | 0 ms | N/A | 0 Hz | 100% | 1.5 – 2.0 ms |
-| **`MODE_STANDBY_LOW_OVERHEAD`** | 470 ms | 30 ms | 500 ms | 2.0 Hz | 94.0% | 1.9 – 3.5 ms |
-| **`MODE_ACTIVE_TDMA` (5 GHz)** | 35 ms | 30 ms | 65 ms | 15.4 Hz | 53.8% | 8.0 – 12.0 ms (~74 Mbps) |
-| **`MODE_ACTIVE_TDMA` (2.4 GHz)** | 35 ms | 30 ms | 65 ms | 15.4 Hz | 53.8% | 11.0 – 15.0 ms (~8 Mbps) |
-| **`MODE_BT_ONLY`** | 0 ms | ∞ | N/A | 0 Hz | 0.0% | N/A |
+| **`MODE_WIFI_ONLY` (BT Off)** | ∞ | 0 ms | N/A | 0 Hz | 100% | 1.5 – 2.0 ms |
+| **`MODE_COEXISTENCE_TDMA` (5 GHz)**| 35 ms | 30 ms | 65 ms | 15.4 Hz | 53.8% | 8.0 – 12.0 ms (~74 Mbps) |
+| **`MODE_COEXISTENCE_TDMA` (2.4 GHz)**| 35 ms | 30 ms | 65 ms | 15.4 Hz | 53.8% | 11.0 – 15.0 ms (~8 Mbps) |
+| **`MODE_BT_ONLY` (Wi-Fi Off)** | 0 ms | ∞ | N/A | 0 Hz | 0.0% | N/A |
 
 ```mermaid
 sequenceDiagram

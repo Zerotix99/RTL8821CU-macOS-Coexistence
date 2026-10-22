@@ -27,12 +27,12 @@ The result is simultaneous, uninterrupted operation: **crisp, low-latency Blueto
 
 ## ⚡ Features
 
-- **Dynamic Auto-Adaptive State Machine (v3.0)**:
-  - **`WIFI_ONLY` Mode**: When Bluetooth is switched off in macOS Control Center, `rtwcoexd` locks the antenna switch to 100% Wi-Fi (`0x0cb4 = 0x10000077`, `0x38 = 0x00003300`). Zero TDMA switching overhead, sub-2ms ping.
-  - **`STANDBY_LOW_OVERHEAD` Mode**: When Bluetooth is enabled but idle (e.g., AirPods inside the charging case), the daemon shifts to a relaxed 470 ms Wi-Fi / 30 ms Bluetooth cycle (94% Wi-Fi antenna time). Wi-Fi delivers full throughput with sub-3.3ms latency, while periodic 30 ms discovery slots ensure instant connection the moment earbuds are removed from the case.
-  - **`ACTIVE_TDMA` Mode**: When Bluetooth audio starts streaming or a device is connected, the engine dynamically transitions into high-frequency TDMA (35 ms Wi-Fi / 30 ms Bluetooth), delivering stutter-free AAC/SBC audio while sustaining Wi-Fi throughput. Operates seamlessly on both 2.4 GHz and 5 GHz networks (reaching ~74 Mbps burst throughput on 802.11ac 5 GHz).
+- **Dynamic Auto-Adaptive State Machine (v3.2)**:
+  - **`COEXISTENCE_TDMA` Mode**: Whenever both Wi-Fi and Bluetooth are enabled, the engine maintains high-frequency symmetric TDMA (35 ms Wi-Fi / 30 ms Bluetooth, ~15.4 Hz). Because Bluetooth receives 30 ms antenna access every 65 ms, device paging and pairing succeed instantly (< 500 ms) with zero Page Timeouts (`0xe00002d6`), audio streams without glitches or drops, and Wi-Fi sustains uninterrupted high-throughput throughput (up to ~74 Mbps burst on 5 GHz 802.11ac).
+  - **`WIFI_ONLY` Mode**: When Bluetooth is switched off in macOS Control Center / System Settings, `rtwcoexd` automatically locks the antenna switch to 100% exclusive Wi-Fi (`0x0cb4 = 0x10000077`, `0x38 = 0x00003300`). Zero TDMA switching overhead, sub-2ms ping.
   - **`BT_ONLY` Mode**: If the Wi-Fi interface is administratively turned off or disconnected, 100% of the antenna is dedicated to Bluetooth.
-- **Fail-Safe TDMA Ordering**: Slot execution is strictly ordered (BT first, WL second), guaranteeing that the multiplexing cycle always exits on the Wi-Fi priority slot during background state polling and IOBluetooth XPC queries.
+- **Fail-Safe TDMA Ordering**: Slot execution is strictly ordered (BT first, WL second), guaranteeing that the multiplexing cycle always exits on the Wi-Fi priority slot during background state polling.
+- **Zero-XPC Lightweight Polling**: Eliminates device enumeration overhead by querying only the controller power state, avoiding IPC locks with Apple's `bluetoothd`.
 - **Hardware-Level PTA Control**: Configures register `0x0cb4` to `0x10000066`, delegating front-end switch control to Realtek's hardware Packet Traffic Arbiter.
 - **Zero Kernel Panic Safety**: Operates entirely in user space using official IOKit `IOConnectCallScalarMethod` dispatch.
 - **Plug-and-Play Hotplug Recovery**: Automatically detects USB disconnects and re-attaches and re-engages PTA mode when the dongle is reconnected.
@@ -45,12 +45,11 @@ The result is simultaneous, uninterrupted operation: **crisp, low-latency Blueto
 
 Measurements taken on a MacBook (macOS 13.7.8) with a Realtek RTL8821CU USB combo dongle connected to a dual-band gateway:
 
-| Operating Mode | Wi-Fi Band | Wi-Fi Antenna Share | Ping to Gateway | Packet Loss | Bluetooth Audio | BT Paging Latency |
+| Operating Mode | Wi-Fi Band | Wi-Fi Antenna Share | Ping to Gateway | Packet Loss | Bluetooth Audio | BT Connection Latency |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`ACTIVE_TDMA` (5 GHz, Audio Streaming)** | **5 GHz** | **54%** (35ms/30ms) | **8 – 12 ms** | **0.0%** | **Flawless (AAC)** | Connected (~74 Mbps WL) |
-| **`ACTIVE_TDMA` (2.4 GHz, Audio Streaming)** | 2.4 GHz | **54%** (35ms/30ms) | **11 – 15 ms** | **0.0%** | **Smooth (AAC)** | Connected (~8 Mbps WL) |
-| **`STANDBY` (BT Idle / Case Closed)** | 5G / 2.4G | **94%** (470ms/30ms) | **2.5 – 3.5 ms** | **0.0%** | Ready | **< 200 ms** (Instant) |
-| **`WIFI_ONLY` (BT Off)** | 5G / 2.4G | **100%** | **1.8 ms** | **0.0%** | N/A (Off) | N/A |
+| **`COEXISTENCE_TDMA` (5 GHz, Streaming)** | **5 GHz** | **54%** (35ms/30ms) | **8 – 12 ms** | **0.0%** | **Flawless (AAC)** | **< 500 ms** (Instant) |
+| **`COEXISTENCE_TDMA` (2.4 GHz, Streaming)**| 2.4 GHz | **54%** (35ms/30ms) | **11 – 15 ms** | **0.0%** | **Smooth (AAC)** | **< 500 ms** (Instant) |
+| **`WIFI_ONLY` (BT Off in Control Center)** | 5G / 2.4G | **100%** | **1.8 ms** | **0.0%** | N/A (Off) | N/A |
 | *Stock Driver (Coexistence OFF)* | 2.4 GHz | 100% static | 2.8 ms | 0.0% | ❌ Impossible | Failed (`0xe00002d6`) |
 | *BT Forced (Coexistence OFF)* | 2.4 GHz | 0% | ∞ | 100.0% | Smooth | Instant |
 
