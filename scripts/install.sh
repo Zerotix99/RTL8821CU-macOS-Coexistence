@@ -14,9 +14,10 @@ echo "=== RTL8821CU macOS Coexistence Installer ==="
 
 # 1. Compile binaries
 echo "[1/6] Compiling rtwcoexd, btconnect, set_audio..."
-clang -O2 -framework IOKit "$REPO_DIR/src/rtwcoexd.c" -o "$REPO_DIR/build/rtwcoexd"
-clang -O2 -framework Foundation -framework IOBluetooth "$REPO_DIR/src/btconnect.m" -o "$REPO_DIR/build/btconnect"
-clang -O2 -framework Foundation -framework CoreAudio "$REPO_DIR/src/set_audio.m" -o "$REPO_DIR/build/set_audio"
+mkdir -p "$REPO_DIR/build"
+clang -O2 -Wall -framework IOKit "$REPO_DIR/src/rtwcoexd.c" -o "$REPO_DIR/build/rtwcoexd"
+clang -O2 -Wall -framework Foundation -framework IOBluetooth "$REPO_DIR/src/btconnect.m" -o "$REPO_DIR/build/btconnect"
+clang -O2 -Wall -framework Foundation -framework CoreAudio "$REPO_DIR/src/set_audio.m" -o "$REPO_DIR/build/set_audio"
 
 # 2. Install to /usr/local/bin
 echo "[2/6] Installing binaries to /usr/local/bin..."
@@ -27,15 +28,19 @@ cp -f "$REPO_DIR/build/set_audio" /usr/local/bin/set_audio
 chmod 755 /usr/local/bin/rtwcoexd /usr/local/bin/btconnect /usr/local/bin/set_audio
 chown root:wheel /usr/local/bin/rtwcoexd /usr/local/bin/btconnect /usr/local/bin/set_audio
 
-# 3. Permanently lock rogue RF-OFF helper file
-echo "[3/6] Applying immutable protection against rogue RF-OFF watchdog..."
-RFOFF_FILE="/Library/Application Support/WLAN/com.realtek.utility.wifi/e0ad474257a2rfoff.rtl"
-if [ -d "$(dirname "$RFOFF_FILE")" ]; then
-    chflags nouchg "$RFOFF_FILE" 2>/dev/null || true
-    echo "0" > "$RFOFF_FILE"
-    chmod 444 "$RFOFF_FILE"
-    chflags uchg "$RFOFF_FILE"
-    echo "      Locked $RFOFF_FILE with uchg flag (value=0)."
+# 3. Permanently lock rogue RF-OFF helper files
+echo "[3/6] Applying immutable protection against rogue RF-OFF watchdogs..."
+WLAN_DIR="/Library/Application Support/WLAN/com.realtek.utility.wifi"
+if [ -d "$WLAN_DIR" ]; then
+    for f in "$WLAN_DIR"/*rfoff.rtl; do
+        if [ -e "$f" ]; then
+            chflags nouchg "$f" 2>/dev/null || true
+            echo "0" > "$f"
+            chmod 444 "$f"
+            chflags uchg "$f"
+            echo "      Protected: $(basename "$f") (locked with uchg, value=0)."
+        fi
+    done
 fi
 
 # 4. Install LaunchDaemon
@@ -49,17 +54,26 @@ launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load "$PLIST_DST"
 sleep 1
 
-# 5. Configure Network Service Priority and DNS
+# 5. Optimize Network Service Priority and DNS Fallback
 echo "[5/6] Optimizing network service order and DNS fallback..."
 # Remove conflicting PAN if present
 networksetup -removenetworkservice "Bluetooth PAN" 2>/dev/null || true
 
-# Order: Ethernet -> Realtek WiFi -> Wi-Fi -> iPhone USB
-networksetup -ordernetworkservices "AX88179B" "Realtek WiFi" "Wi-Fi" "iPhone USB" 2>/dev/null || \
-networksetup -ordernetworkservices "Realtek WiFi" "AX88179B" "Wi-Fi" "iPhone USB" 2>/dev/null || true
-
-# Add DNS fallback to Realtek WiFi
-networksetup -setdnsservers "Realtek WiFi" 192.168.0.1 1.1.1.1 8.8.8.8 2>/dev/null || true
+# Find Realtek Wi-Fi service name
+RT_SERVICE=$(networksetup -listallhardwareports 2>/dev/null | awk '/802.11ac NIC/{getline; print $2}' | head -n 1)
+if [ -n "$RT_SERVICE" ]; then
+    SERVICE_NAME=$(networksetup -listnetworkserviceorder 2>/dev/null | grep -B 1 "$RT_SERVICE" | head -n 1 | sed 's/^[^(]*([0-9]*) //')
+    if [ -n "$SERVICE_NAME" ]; then
+        echo "      Detected Realtek Wi-Fi Service: '$SERVICE_NAME'"
+        # Discover current gateway for DNS fallback
+        GATEWAY=$(netstat -rn | grep default | awk '{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+        if [ -n "$GATEWAY" ]; then
+            networksetup -setdnsservers "$SERVICE_NAME" "$GATEWAY" 1.1.1.1 8.8.8.8 2>/dev/null || true
+        else
+            networksetup -setdnsservers "$SERVICE_NAME" 1.1.1.1 8.8.8.8 2>/dev/null || true
+        fi
+    fi
+fi
 
 # 6. Verify daemon execution
 echo "[6/6] Verifying rtwcoexd status..."

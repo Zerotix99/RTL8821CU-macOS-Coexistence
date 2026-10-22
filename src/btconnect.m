@@ -1,52 +1,112 @@
 /**
- * btconnect - Fast macOS Bluetooth connection utility using IOBluetooth
+ * btconnect - Flexible macOS Bluetooth Connection Utility using IOBluetooth
  * 
- * Usage: btconnect [device_mac_address]
- * Default: 40-b3-fa-21-d8-91 (AirPods Pro)
+ * Connects to Bluetooth audio devices (AirPods, headphones, speakers) by MAC address
+ * or device name substring. If no argument is given, lists paired devices.
  *
- * Copyright (c) 2026 Magnus Krüger & DeepMind Antigravity Pair-Programming.
- * Licensed under the MIT License.
+ * Copyright (c) 2026 Magnus Krüger. Released under the MIT License.
  */
 
 #import <Foundation/Foundation.h>
 #import <IOBluetooth/IOBluetooth.h>
 
-#define DEFAULT_DEVICE_ADDR @"40-b3-fa-21-d8-91"
+void print_usage(const char *prog) {
+    printf("Usage:\n");
+    printf("  %s <device-name-or-mac>    Connect to a specific paired device\n", prog);
+    printf("  %s --list                  List all paired devices\n", prog);
+    printf("  %s                         Auto-connect to the first paired audio device\n", prog);
+}
 
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
-        NSString *targetAddr = DEFAULT_DEVICE_ADDR;
-        if (argc > 1) {
-            targetAddr = [NSString stringWithUTF8String:argv[1]];
-        }
-        targetAddr = [targetAddr stringByReplacingOccurrencesOfString:@":" withString:@"-"].lowercaseString;
-
-        IOBluetoothDevice *dev = [IOBluetoothDevice deviceWithAddressString:targetAddr];
-        if (!dev) {
-            fprintf(stderr, "Error: Bluetooth device '%s' not found in paired device cache.\n", [targetAddr UTF8String]);
+        NSArray *pairedDevices = [IOBluetoothDevice pairedDevices];
+        if (!pairedDevices || [pairedDevices count] == 0) {
+            fprintf(stderr, "No paired Bluetooth devices found.\n");
             return 1;
         }
 
-        NSString *name = [dev name] ? [dev name] : @"(Unknown Name)";
-        printf("Target Device: %s [%s]\n", [name UTF8String], [[dev addressString] UTF8String]);
-
-        if ([dev isConnected]) {
-            printf("Status: Device is ALREADY connected.\n");
+        if (argc > 1 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
+            print_usage(argv[0]);
             return 0;
         }
 
-        printf("Initiating connection (page timeout: 3000ms)...\n");
-        IOReturn kr = [dev openConnection:nil withPageTimeout:3000 authenticationRequired:NO];
+        if (argc > 1 && (strcmp(argv[1], "-l") == 0 || strcmp(argv[1], "--list") == 0)) {
+            printf("Paired Bluetooth Devices (%lu found):\n", (unsigned long)[pairedDevices count]);
+            for (IOBluetoothDevice *d in pairedDevices) {
+                printf("  - %s [%s] (Connected: %s)\n",
+                       [[d name] UTF8String],
+                       [[d addressString] UTF8String],
+                       [d isConnected] ? "YES" : "NO");
+            }
+            return 0;
+        }
+
+        IOBluetoothDevice *targetDevice = nil;
+
+        if (argc > 1) {
+            NSString *query = [NSString stringWithUTF8String:argv[1]];
+            NSString *normalizedQuery = [query stringByReplacingOccurrencesOfString:@":" withString:@"-"].lowercaseString;
+
+            for (IOBluetoothDevice *d in pairedDevices) {
+                NSString *addr = [[d addressString] lowercaseString];
+                NSString *name = [d name] ? [d name] : @"";
+
+                if ([addr isEqualToString:normalizedQuery] ||
+                    [name localizedCaseInsensitiveContainsString:query]) {
+                    targetDevice = d;
+                    break;
+                }
+            }
+
+            if (!targetDevice) {
+                // Try direct address lookup if not matched in paired list
+                targetDevice = [IOBluetoothDevice deviceWithAddressString:normalizedQuery];
+            }
+        } else {
+            // Auto-detect first paired audio device (Headphones/AirPods)
+            for (IOBluetoothDevice *d in pairedDevices) {
+                BluetoothDeviceClassMinor minor = [d deviceClassMinor];
+                NSString *name = [d name] ? [d name] : @"";
+                // Minor class 1 = Wearable Headset, 2 = Hands-free, 6 = Headphones
+                if (minor == 1 || minor == 2 || minor == 6 ||
+                    [name localizedCaseInsensitiveContainsString:@"AirPods"] ||
+                    [name localizedCaseInsensitiveContainsString:@"Headphones"] ||
+                    [name localizedCaseInsensitiveContainsString:@"Buds"]) {
+                    targetDevice = d;
+                    break;
+                }
+            }
+            if (!targetDevice && [pairedDevices count] > 0) {
+                targetDevice = [pairedDevices firstObject];
+            }
+        }
+
+        if (!targetDevice) {
+            fprintf(stderr, "Error: No matching Bluetooth device found.\n");
+            return 1;
+        }
+
+        NSString *devName = [targetDevice name] ? [targetDevice name] : @"(Unknown Device)";
+        NSString *devAddr = [targetDevice addressString] ? [targetDevice addressString] : @"(Unknown Address)";
+
+        printf("Target: %s [%s]\n", [devName UTF8String], [devAddr UTF8String]);
+
+        if ([targetDevice isConnected]) {
+            printf("Status: Device is already connected.\n");
+            return 0;
+        }
+
+        printf("Opening connection (page timeout: 3000ms)...\n");
+        IOReturn kr = [targetDevice openConnection:nil withPageTimeout:3000 authenticationRequired:NO];
         if (kr == kIOReturnSuccess) {
-            printf("Success: Connection opened (kr = 0x%08x).\n", kr);
-            // Brief wait for services to settle
-            usleep(200000); // 200ms
-            printf("Connected: %s\n", [dev isConnected] ? "YES" : "PENDING");
+            usleep(250000); // 250ms for services to settle
+            printf("Success: Connected to %s (status: %s)\n",
+                   [devName UTF8String], [targetDevice isConnected] ? "ACTIVE" : "ESTABLISHING");
             return 0;
         } else {
-            fprintf(stderr, "Failed: openConnection returned error 0x%08x (%d).\n", kr, kr);
+            fprintf(stderr, "Connection failed: openConnection returned 0x%08x (%d)\n", kr, kr);
             if (kr == (IOReturn)0xe00002d6) {
-                fprintf(stderr, "Hint: Page Timeout (0xe00002d6). Check that AirPods are OUT of the case or case lid is open.\n");
+                fprintf(stderr, "Note: Page Timeout (0xe00002d6). Ensure the target device is awake and in range.\n");
             }
             return 2;
         }

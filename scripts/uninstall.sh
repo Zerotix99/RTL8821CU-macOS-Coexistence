@@ -22,9 +22,14 @@ rm -f /usr/local/bin/btconnect
 rm -f /usr/local/bin/set_audio
 rm -f /var/log/rtwcoexd.log
 
-RFOFF_FILE="/Library/Application Support/WLAN/com.realtek.utility.wifi/e0ad474257a2rfoff.rtl"
-if [ -f "$RFOFF_FILE" ]; then
-    chflags nouchg "$RFOFF_FILE" 2>/dev/null || true
+WLAN_DIR="/Library/Application Support/WLAN/com.realtek.utility.wifi"
+if [ -d "$WLAN_DIR" ]; then
+    for f in "$WLAN_DIR"/*rfoff.rtl; do
+        if [ -e "$f" ]; then
+            chflags nouchg "$f" 2>/dev/null || true
+            echo "Unlocked: $(basename "$f")"
+        fi
+    done
 fi
 
 echo "Uninstallation complete."
