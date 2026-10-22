@@ -104,34 +104,42 @@ static int open_device(void) {
     return 0;
 }
 
-static int is_wifi_active(const char *ifname) {
+static int is_wifi_enabled(const char *ifname) {
     struct ifaddrs *ifaddr, *ifa;
     if (getifaddrs(&ifaddr) == -1) return 0;
-    int active = 0;
+    int enabled = 0;
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL) continue;
-        if (strcmp(ifa->ifa_name, ifname) == 0 && ifa->ifa_addr->sa_family == AF_INET) {
-            if (ifa->ifa_flags & (IFF_UP | IFF_RUNNING)) {
-                active = 1;
+        if (strcmp(ifa->ifa_name, ifname) == 0 && ifa->ifa_addr->sa_family == AF_LINK) {
+            if (ifa->ifa_flags & IFF_UP) {
+                enabled = 1;
                 break;
             }
         }
     }
     freeifaddrs(ifaddr);
-    return active;
+    return enabled;
 }
 
 static CoexMode evaluate_system_state(void) {
     @autoreleasepool {
         IOBluetoothHostController *ctl = [IOBluetoothHostController defaultController];
-        if (!ctl || [ctl powerState] != 1) {
+        BOOL bt_on = (ctl && [ctl powerState] == 1);
+        BOOL wifi_on = (is_wifi_enabled(g_wifi_ifname) != 0);
+
+        if (!bt_on && wifi_on) {
             return MODE_WIFI_ONLY;
         }
 
-        if (!is_wifi_active(g_wifi_ifname)) {
+        if (!wifi_on && bt_on) {
             return MODE_BT_ONLY;
         }
 
+        if (!wifi_on && !bt_on) {
+            return MODE_WIFI_ONLY; // Default idle
+        }
+
+        // Both are enabled: check if any Bluetooth audio devices are connected
         NSArray *paired = [IOBluetoothDevice pairedDevices];
         int connectedCount = 0;
         for (IOBluetoothDevice *d in paired) {
@@ -152,7 +160,7 @@ static const char* mode_name(CoexMode m) {
     switch (m) {
         case MODE_WIFI_ONLY:            return "WIFI_ONLY (100% Wi-Fi)";
         case MODE_BT_ONLY:              return "BT_ONLY (100% Bluetooth)";
-        case MODE_STANDBY_LOW_OVERHEAD: return "STANDBY_LOW_OVERHEAD (100ms WL / 15ms BT)";
+        case MODE_STANDBY_LOW_OVERHEAD: return "STANDBY_LOW_OVERHEAD (470ms WL / 30ms BT)";
         case MODE_ACTIVE_TDMA:          return "ACTIVE_TDMA (35ms WL / 30ms BT)";
         default:                        return "UNKNOWN";
     }
