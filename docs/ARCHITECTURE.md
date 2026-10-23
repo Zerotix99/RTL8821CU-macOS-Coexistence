@@ -121,3 +121,26 @@ AirPods Pro firmware reports in-ear optical sensor status via Apple Accessory Co
 - **In Ear**: `primaryStatus = 1`. CoreAudio immediately unhides the audio endpoint (`mAudioRouteHidden = 0`) and routes system audio to AirPods.
 
 The repository includes `src/set_audio.m` to verify and force default system routing when endpoints are published.
+
+---
+
+## 5. Resilience: Hotplug Recovery & Dynamic Interface Resolution
+
+### Hotplug & Deep Sleep Mach Port Lifecycle
+When a USB device is physically disconnected or enters a power-managed USB bus suspend during deep sleep, the Mach port handle (`io_connect_t g_connect`) becomes stale (`kIOReturnNotAttached` or `kIOReturnNoDevice`).
+
+`rtwcoexd` rigorously validates the `kern_return_t` of every IOKit call:
+- Upon write failure (`kr != KERN_SUCCESS`), `close_device()` immediately tears down the invalid Mach port and resets `g_connect = 0`.
+- The main event loop then invokes `open_device()` with exponential backoff (500 ms) until the device re-enumerates.
+- Once re-attached, hardware PTA mode (`0x10000066`) and the TDMA state machine are automatically restored without daemon restarts.
+
+### Dynamic BSD Interface Resolution
+Rather than assuming a static interface identifier (such as `en2`), `open_device()` inspects the IOKit registry tree:
+```objc
+CFTypeRef bsdName = IORegistryEntrySearchCFProperty(service,
+                                                    kIOServicePlane,
+                                                    CFSTR("BSD Name"),
+                                                    kCFAllocatorDefault,
+                                                    kIORegistryIterateRecursively);
+```
+This traverses the `RtWlanU` child tree down to the `IOEthernetInterface` leaf node, extracting the dynamically assigned BSD name (e.g., `en1`, `en2`, `en3`) directly. Manual interface specification via `-i <ifname>` remains available for explicit override.

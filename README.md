@@ -33,9 +33,10 @@ The result is simultaneous, uninterrupted operation: **crisp, low-latency Blueto
   - **`BT_ONLY` Mode**: If the Wi-Fi interface is administratively turned off or disconnected, 100% of the antenna is dedicated to Bluetooth.
 - **Fail-Safe TDMA Ordering**: Slot execution is strictly ordered (BT first, WL second), guaranteeing that the multiplexing cycle always exits on the Wi-Fi priority slot during background state polling.
 - **Zero-XPC Lightweight Polling**: Eliminates device enumeration overhead by querying only the controller power state, avoiding IPC locks with Apple's `bluetoothd`.
+- **Dynamic BSD Interface Auto-Detection**: Dynamically resolves the BSD network interface name (`en1`, `en2`, `en3`, etc.) directly from the `RtWlanU` IOKit registry tree via `IORegistryEntrySearchCFProperty`, ensuring universal compatibility across any Mac model without hardcoded interface names.
 - **Hardware-Level PTA Control**: Configures register `0x0cb4` to `0x10000066`, delegating front-end switch control to Realtek's hardware Packet Traffic Arbiter.
-- **Zero Kernel Panic Safety**: Operates entirely in user space using official IOKit `IOConnectCallScalarMethod` dispatch.
-- **Plug-and-Play Hotplug Recovery**: Automatically detects USB disconnects and re-attaches and re-engages PTA mode when the dongle is reconnected.
+- **Zero Kernel Panic Safety**: Operates entirely in user space using official IOKit `IOConnectCallStructMethod` dispatch.
+- **Plug-and-Play Hotplug & Sleep Recovery**: Verifies every IOKit call return code (`kern_return_t`), automatically resetting dead Mach ports upon physical USB disconnects or system sleep events and seamlessly reconnecting when re-attached.
 - **Rogue RF-OFF Immunity**: Automatically locks vendor watchdog trigger files (`*rfoff.rtl`) with immutable filesystem flags (`uchg`).
 - **CoreAudio Integration**: Provides CLI utilities (`btconnect`, `set_audio`) to automate Bluetooth connection and default audio route binding.
 

@@ -52,6 +52,7 @@ static volatile sig_atomic_t g_running = 1;
 static io_connect_t g_connect = 0;
 static bool g_verbose = false;
 static char g_wifi_ifname[32] = "en2";
+static bool g_ifname_custom = false;
 
 // Active TDMA Slot Durations
 static int g_active_bt_ms = 30;
@@ -90,6 +91,28 @@ static void close_device(void) {
 static int open_device(void) {
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("RtWlanU"));
     if (!service) return -1;
+
+    // Dynamically auto-detect BSD Interface Name (e.g. en1, en2, en3) unless overridden by -i flag
+    if (!g_ifname_custom) {
+        CFTypeRef bsdName = IORegistryEntrySearchCFProperty(service,
+                                                            kIOServicePlane,
+                                                            CFSTR("BSD Name"),
+                                                            kCFAllocatorDefault,
+                                                            kIORegistryIterateRecursively);
+        if (bsdName && CFGetTypeID(bsdName) == CFStringGetTypeID()) {
+            CFStringGetCString((CFStringRef)bsdName, g_wifi_ifname, sizeof(g_wifi_ifname), kCFStringEncodingUTF8);
+            CFRelease(bsdName);
+            if (g_verbose) {
+                syslog(LOG_INFO, "rtwcoexd: dynamically discovered Wi-Fi interface: %s", g_wifi_ifname);
+            }
+        } else {
+            if (bsdName) CFRelease(bsdName);
+            if (g_wifi_ifname[0] == '\0') {
+                strncpy(g_wifi_ifname, "en2", sizeof(g_wifi_ifname) - 1);
+            }
+        }
+    }
+
     kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &g_connect);
     IOObjectRelease(service);
     if (kr != KERN_SUCCESS || !g_connect) {
@@ -180,6 +203,7 @@ int main(int argc, char **argv) {
                 break;
             case 'i':
                 strncpy(g_wifi_ifname, optarg, sizeof(g_wifi_ifname) - 1);
+                g_ifname_custom = true;
                 break;
             case 'v':
                 g_verbose = true;
@@ -220,20 +244,30 @@ int main(int argc, char **argv) {
             current_mode = new_mode;
 
             // Apply mode-specific initial register configuration
+            kern_return_t kr = KERN_SUCCESS;
             switch (current_mode) {
                 case MODE_WIFI_ONLY:
-                    write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_WIFI_MANUAL, 4);
-                    write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_WL_PRIORITY);
+                    kr = write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_WIFI_MANUAL, 4);
+                    if (kr == KERN_SUCCESS) {
+                        kr = write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_WL_PRIORITY);
+                    }
                     break;
                 case MODE_BT_ONLY:
-                    write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_BT_MANUAL, 4);
-                    write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
+                    kr = write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_BT_MANUAL, 4);
+                    if (kr == KERN_SUCCESS) {
+                        kr = write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
+                    }
                     break;
                 case MODE_COEXISTENCE_TDMA:
-                    write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
+                    kr = write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
                     break;
                 default:
                     break;
+            }
+            if (kr != KERN_SUCCESS) {
+                syslog(LOG_WARNING, "rtwcoexd: mode configuration failed (kr=0x%x). Reconnecting...", kr);
+                close_device();
+                continue;
             }
         }
 
@@ -243,20 +277,45 @@ int main(int argc, char **argv) {
             for (int i = 0; i < 10 && g_running; i++) {
                 usleep(100000); // 100ms * 10 = 1s
             }
+            // Periodically verify connection health in static mode
+            if (g_connect) {
+                uint32_t val = (current_mode == MODE_WIFI_ONLY) ? VAL_RFE_WIFI_MANUAL : VAL_RFE_BT_MANUAL;
+                kern_return_t kr = write_reg(g_connect, 1, REG_RFE_CTRL8, val, 4);
+                if (kr != KERN_SUCCESS) {
+                    syslog(LOG_WARNING, "rtwcoexd: static mode check failed (kr=0x%x). Reconnecting...", kr);
+                    close_device();
+                }
+            }
         } else if (current_mode == MODE_COEXISTENCE_TDMA) {
             // Full Coexistence TDMA: 30ms BT / 35ms WL (~15.4 Hz)
             // 15 cycles = ~975ms per state evaluation.
             // Guarantees immediate Bluetooth pairing & crystal-clear audio while sustaining Wi-Fi.
             for (int i = 0; i < 15 && g_running; i++) {
                 // Bluetooth slot first
-                write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
+                kern_return_t kr1 = write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_BT_PRIORITY);
+                if (kr1 != KERN_SUCCESS) {
+                    syslog(LOG_WARNING, "rtwcoexd: IOKit write failed (kr1=0x%x, USB unplugged/reset). Reconnecting...", kr1);
+                    close_device();
+                    break;
+                }
                 usleep(g_active_bt_ms * 1000);
 
                 // Wi-Fi slot second
-                write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_WL_PRIORITY);
+                kern_return_t kr2 = write_indirect(g_connect, REG_LTECOEX_CTRL, COEX_WL_PRIORITY);
+                if (kr2 != KERN_SUCCESS) {
+                    syslog(LOG_WARNING, "rtwcoexd: IOKit write failed (kr2=0x%x, USB unplugged/reset). Reconnecting...", kr2);
+                    close_device();
+                    break;
+                }
                 usleep(g_active_wl_ms * 1000);
             }
-            write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
+            if (g_connect) {
+                kern_return_t kr_pta = write_reg(g_connect, 1, REG_RFE_CTRL8, VAL_RFE_PTA, 4);
+                if (kr_pta != KERN_SUCCESS) {
+                    syslog(LOG_WARNING, "rtwcoexd: PTA refresh failed (kr=0x%x). Reconnecting...", kr_pta);
+                    close_device();
+                }
+            }
         }
     }
 
